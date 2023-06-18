@@ -136,52 +136,53 @@ def generate_trajectories(pde: PDE,
     h5f = h5py.File("".join([save_name, '.h5']), 'a')
     dataset = h5f.create_group(mode)
 
-    tcoord = {}
-    xcoord = {}
-    dx = {}
-    dt = {}
+    t = {}
+    x = {}
     h5f_u = {}
 
     # Tolerance of the solver
     tol = 1e-9
     nt = pde.grid_size[0]
     nx = pde.grid_size[1]
+    nx_hr = 2 * nx
+    L = pde.L
+    # spatio-temporal domain
+    t = np.linspace(pde.tmin, pde.tmax, nt)
+    x = np.linspace(0, (1 - 1.0 / nx) * L, nx)
+    x_hr = np.linspace(0, (1 - 1.0 / nx_hr) * L, nx_hr)
+
     # The field u, the coordinations (xcoord, tcoord) and dx, dt are saved
-    # Only nt_effective time steps of each trajectories are saved
-    h5f_u = dataset.create_dataset(f'pde_{pde.nt_effective}-{nx}', (num_samples, pde.nt_effective, nx), dtype=float)
-    xcoord = dataset.create_dataset(f'x', (num_samples, nx), dtype=float)
-    dx = dataset.create_dataset(f'dx', (num_samples,), dtype=float)
-    tcoord = dataset.create_dataset(f't', (num_samples, pde.nt_effective), dtype=float)
-    dt = dataset.create_dataset(f'dt', (num_samples,), dtype=float)
+    h5f_u = dataset.create_dataset(f'pde_{pde.nt}-{nx}', (num_samples, pde.nt, nx), dtype=float)
+    h5f_u_hr = dataset.create_dataset(f'pde_{pde.nt}-{nx_hr}', (num_samples, pde.nt, nx_hr), dtype=float)
+
+    h5f_u.attrs['dt'] = t[1] - t[0]
+    h5f_u.attrs['dx'] = x[1] - x[0]
+    h5f_u.attrs['nt'] = nt
+    h5f_u.attrs['nx'] = nx
+    h5f_u.attrs['tmin'] = pde.tmin
+    h5f_u.attrs['tmax'] = pde.tmax
+    h5f_u.attrs['x'] = np.linspace(0, (1 - 1.0 / nx) * L, nx)
+
+    h5f_u_hr.attrs['dt'] = t[1] - t[0]
+    h5f_u_hr.attrs['dx'] = x_hr[1] - x_hr[0]
+    h5f_u_hr.attrs['nt'] = nt
+    h5f_u_hr.attrs['nx'] = nx_hr
+    h5f_u_hr.attrs['tmin'] = pde.tmin
+    h5f_u_hr.attrs['tmax'] = pde.tmax
+    h5f_u_hr.attrs['x'] = np.linspace(0, (1 - 1.0 / nx_hr) * L, nx_hr)
 
     for idx in range(num_batches):
-
-        # For the Heat (Burgers') equation, a fixed grid is used
-        # For KdV and KS, the grid is flexible ->  this is due to scale symmetries which we want to exploit
-        if pde_string == 'Heat':
-            T = pde.tmax
-            L = pde.L
-
-        else:
-            t1 = pde.tmax - pde.tmax / 10
-            t2 = pde.tmax + pde.tmax / 10
-            T = (t1 - t2) * np.random.rand() + t2
-            l1 = pde.L - pde.L / 10
-            l2 = pde.L + pde.L / 10
-            L = (l1 - l2) * np.random.rand() + l2
-
-        t = np.linspace(pde.tmin, T, nt)
-        x = np.linspace(0, (1 - 1.0 / nx) * L, nx)
-
         # Parameters for initial conditions
         A, omega, l = params(pde, batch_size, device=device)
 
         # Initial condition of the equation at end
         u0 = initial_conditions(A, omega, l, L)(x[:, None])
+        u0_hr = initial_conditions(A, omega, l, L)(x_hr[:, None])
 
         # We use the initial condition of Burgers' equation and inverse Cole-Hopf transform it into the Heat equation
         if pde_string == 'Heat':
             u0 = inv_cole_hopf(u0)
+            u0_hr = inv_cole_hopf(u0_hr)
 
         # We use pseudospectral reconstruction as spatial solver
         spatial_method = pde.pseudospectral_reconstruction
@@ -196,18 +197,26 @@ def generate_trajectories(pde: PDE,
                                       args=(L, ),
                                       atol=tol,
                                       rtol=tol)
+        
+        solved_trajectory_hr = solve_ivp(fun=spatial_method,
+                                         t_span=[t[0], t[-1]],
+                                         y0=u0_hr,
+                                         method='Radau',
+                                         t_eval=t,
+                                         args=(L, ),
+                                         atol=tol,
+                                         rtol=tol)
 
         # Saving the trajectories, if successfully solved
         if solved_trajectory.success:
-            sol = solved_trajectory.y.T[-pde.nt_effective:]
-            h5f_u[idx:idx+1, :, :] = sol
-            xcoord[idx:idx+1, :] = x
-            dx[idx:idx+1] = L/nx
-            tcoord[idx:idx + 1, :] = t[-pde.nt_effective:]
-            dt[idx:idx+1] = T/(nt-1)
+            h5f_u[idx:idx+1, :, :] = solved_trajectory.y.T
+            h5f_u_hr[idx:idx+1, :, :] = solved_trajectory_hr.y.T
 
         else:
             print("Solution was not successful.")
+            # we don't want to save the data if the solution was not successful
+            h5f_u[idx:idx+1, :, :] = np.nan
+            h5f_u_hr[idx:idx+1, :, :] = np.nan
 
         print("Solved indices: {:d} : {:d}".format(idx * batch_size, (idx + 1) * batch_size - 1))
         print("Solved batches: {:d} of {:d}".format(idx + 1, num_batches))
@@ -225,7 +234,6 @@ def generate_data(experiment: str,
                   L: float,
                   nx: int,
                   nt: int,
-                  nt_effective: int,
                   num_samples_train: int,
                   num_samples_valid: int,
                   num_samples_test: int,
@@ -261,14 +269,12 @@ def generate_data(experiment: str,
         pde = KdV(tmin=starting_time,
                   tmax=end_time,
                   grid_size=(nt, nx),
-                  nt_effective=nt_effective,
                   L=L,
                   device=device)
     elif experiment == 'KS':
         pde = KS(tmin=starting_time,
                  tmax=end_time,
                  grid_size=(nt, nx),
-                 nt_effective=nt_effective,
                  L=L,
                  device=device)
 
@@ -278,7 +284,6 @@ def generate_data(experiment: str,
         pde = Heat(tmin=starting_time,
                  tmax=end_time,
                  grid_size=(nt, nx),
-                 nt_effective=nt_effective,
                  device=device)
 
     else:
@@ -318,7 +323,6 @@ def main(args: argparse) -> None:
                   end_time=args.end_time,
                   L=args.L,
                   nt=args.nt,
-                  nt_effective=args.nt_effective,
                   nx=args.nx,
                   num_samples_train=args.train_samples,
                   num_samples_valid=args.valid_samples,
@@ -338,8 +342,6 @@ if __name__ == "__main__":
                         help='How long do we want to simulate')
     parser.add_argument('--nt', type=int, default=250,
                         help='Time steps used for solving')
-    parser.add_argument('--nt_effective', type=int, default=140,
-                        help='Solved timesteps used for training')
     parser.add_argument('--nx', type=int, default=256,
                         help='Spatial resolution')
     parser.add_argument('--L', type=float, default=128.,

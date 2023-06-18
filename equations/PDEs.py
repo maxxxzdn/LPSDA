@@ -45,7 +45,6 @@ class KdV(PDE):
                  tmin: float=None,
                  tmax: float=None,
                  grid_size: list=None,
-                 nt_effective: int=None,
                  L: float=None,
                  lmin: float=None,
                  lmax: float=None,
@@ -63,7 +62,6 @@ class KdV(PDE):
         self.L = 128. if L is None else L
         self.grid_size = (100, 2 ** 8) if grid_size is None else grid_size
         # The effective time steps used for learning and inference
-        self.nt_effective = 100 if nt_effective is None else nt_effective
         self.nt = self.grid_size[0]
         self.nx = self.grid_size[1]
         # dt and dx are slightly different due to periodicity in the spatial domain
@@ -78,8 +76,6 @@ class KdV(PDE):
         self.max_x_shift = 0.0
         self.max_velocity = 0.0
         self.max_scale = 0.0
-
-        assert (self.grid_size[0] >= self.nt_effective)
 
     def __repr__(self):
         return f'KdV'
@@ -122,7 +118,6 @@ class KdV(PDE):
         Jlhs = np.roll(Jrhs, 1)
         dudt = -(Jrhs - Jlhs) / dx
         return dudt
-
 
 class KS(PDE):
     """
